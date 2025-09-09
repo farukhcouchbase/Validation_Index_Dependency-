@@ -7,33 +7,19 @@ PORT=${PORT:='8091'}
 PROTOCOL=${PROTOCOL:='http'}
 QUERY_NODE=${QUERY_NODE:='127.0.0.1'}
 QUERY_PORT=${QUERY_PORT:='8093'}
+BUCKET=""   # Optional bucket argument
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --username=*)
-      CB_USERNAME="${1#*=}"
-      ;;
-    --password=*)
-      CB_PASSWORD="${1#*=}"
-      ;;
-    --cluster=*)
-      CLUSTER="${1#*=}"
-      ;;
-    --port=*)
-      PORT="${1#*=}"
-      ;;
-    --protocol=*)
-      PROTOCOL="${1#*=}"
-      ;;
-    --query-node=*)
-      QUERY_NODE="${1#*=}"
-      ;;
-    --query-port=*)
-      QUERY_PORT="${1#*=}"
-      ;;
-    *)
-      printf "* Error: Invalid argument.\n"
-      exit 1
+    --username=*) CB_USERNAME="${1#*=}" ;;
+    --password=*) CB_PASSWORD="${1#*=}" ;;
+    --cluster=*) CLUSTER="${1#*=}" ;;
+    --port=*) PORT="${1#*=}" ;;
+    --protocol=*) PROTOCOL="${1#*=}" ;;
+    --query-node=*) QUERY_NODE="${1#*=}" ;;
+    --query-port=*) QUERY_PORT="${1#*=}" ;;
+    --bucket=*) BUCKET="${1#*=}" ;;   # NEW bucket option
+    *) printf "* Error: Invalid argument.\n"; exit 1 ;;
   esac
   shift
 done
@@ -57,8 +43,12 @@ if [[ -z "$QUERY_NODE" ]]; then
   fi
 fi
 
-# Get all buckets in the cluster
-buckets=$(curl --user "$CB_USERNAME:$CB_PASSWORD" --silent "$PROTOCOL://$CLUSTER:$PORT/pools/default/buckets" | jq -r '.[].name')
+# Get all buckets (or only the given one)
+if [ -n "$BUCKET" ]; then
+  buckets="$BUCKET"
+else
+  buckets=$(curl --user "$CB_USERNAME:$CB_PASSWORD" --silent "$PROTOCOL://$CLUSTER:$PORT/pools/default/buckets" | jq -r '.[].name')
+fi
 
 # Loop through each bucket
 for bucket in $buckets; do
@@ -149,80 +139,3 @@ for bucket in $buckets; do
 done
 
 echo "All deferred indexes processed."
-
-
-
-CB_USERNAME=${CB_USERNAME:='Admin'}
-CB_PASSWORD=${CB_PASSWORD:='redhat'}
-CLUSTER=${CLUSTER:='localhost'}
-PORT=${PORT:='8091'}
-PROTOCOL=${PROTOCOL:='http'}
-QUERY_NODE=${QUERY_NODE:='127.0.0.1'}
-QUERY_PORT=${QUERY_PORT:='8093'}
-BUCKET="travel-sample"
-
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --username=*) CB_USERNAME="${1#*=}" ;;
-    --password=*) CB_PASSWORD="${1#*=}" ;;
-    --cluster=*) CLUSTER="${1#*=}" ;;
-    --port=*) PORT="${1#*=}" ;;
-    --protocol=*) PROTOCOL="${1#*=}" ;;
-    --query-node=*) QUERY_NODE="${1#*=}" ;;
-    --query-port=*) QUERY_PORT="${1#*=}" ;;
-    --bucket=*) BUCKET="${1#*=}" ;;
-    *) echo "Error: Invalid argument." && exit 1 ;;
-  esac
-  shift
-done
-
-# Ensure jq is installed
-if ! command -v jq &> /dev/null; then
-  echo "jq is required. Install it from https://stedolan.github.io/jq/download"
-  exit 1
-fi
-
-# Find a query node in the cluster if not specified
-if [[ -z "$QUERY_NODE" ]]; then
-  QUERY_NODE=$(curl --user "$CB_USERNAME:$CB_PASSWORD" --silent "$PROTOCOL://$CLUSTER:$PORT/pools/nodes" | \
-    jq -r '.nodes[] | select(.services | contains(["n1ql"])) | .hostname' | head -n 1 | sed 's/:.*//')
-fi
-
-if [[ -z "$QUERY_NODE" ]]; then
-  echo "Error: No query node found in the cluster."
-  exit 1
-fi
-
-# Fetch all indexes from the bucket and filter for 'deferred' indexes
-INDEX_QUERY="SELECT RAW name FROM system:indexes WHERE state='deferred' AND keyspace_id='${BUCKET}';"
-INDEX_RESPONSE=$(curl --user "$CB_USERNAME:$CB_PASSWORD" --silent --data-urlencode "statement=${INDEX_QUERY}" "$PROTOCOL://$QUERY_NODE:$QUERY_PORT/query/service")
-
-# Debugging output (Uncomment for debugging)
-# echo "Response from Couchbase: $INDEX_RESPONSE"
-
-# Extract indexes
-DEFERRED_INDEXES=$(echo "$INDEX_RESPONSE" | jq -r '.results | join(", ")')
-
-# Check if indexes are found
-if [[ -z "$DEFERRED_INDEXES" || "$DEFERRED_INDEXES" == "null" ]]; then
-  echo "No deferred indexes found for bucket: $BUCKET."
-  exit 0
-fi
-
-echo "Deferred Indexes Found: $DEFERRED_INDEXES"
-
-# Construct the BUILD INDEX query
-BUILD_QUERY="BUILD INDEX ON \`$BUCKET\` ($DEFERRED_INDEXES) USING GSI;"
-
-echo "Building deferred indexes..."
-echo "$BUILD_QUERY"
-
-# Execute the build index query
-/opt/couchbase/bin/cbq -engine="$PROTOCOL://$QUERY_NODE:$QUERY_PORT" -u "$CB_USERNAME" -p "$CB_PASSWORD" -s "$BUILD_QUERY"
-
-if [[ $? -eq 0 ]]; then
-  echo "Deferred indexes built successfully."
-else
-  echo "Failed to build indexes."
-  exit 1
-fi
